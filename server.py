@@ -5,6 +5,7 @@ Finance MCP Server
 Tools:
   A股实时:  get_realtime_by_name, get_realtime_tick_by_name, get_realtime_list_top
   A股历史:  get_stock_history, get_daily_basic, get_moneyflow
+  A股实时资金: get_realtime_moneyflow
   A股基本面: get_stock_info, get_financial_indicators, get_income_statement
   A股资金:  get_hsgt_top10
   涨停板:   get_daban_indicators, get_market_sentiment_report
@@ -34,11 +35,15 @@ from services.tushare import TushareService
 from services.daban import ThsDabanService
 from services.us_stock import USStockService
 from services.x_search import XSearchService
+from services.eastmoney import EastMoneyService
+from services.baidu_stock import BaiduStockService
 
 _tushare = TushareService()
+_eastmoney = EastMoneyService(_tushare)
 _daban = ThsDabanService()
 _us_stock = USStockService()
 _x_search = XSearchService()
+_baidu_stock = BaiduStockService()
 
 # ── MCP server ───────────────────────────────────────────────────────────────
 
@@ -50,7 +55,8 @@ mcp = FastMCP(
         "Financial analysis tools for A-shares (China) and US stocks.\n"
         "A-share capabilities: real-time quotes, tick data, historical K-line with technical indicators "
         "(MA/MACD/RSI), daily valuation metrics (PE/PB/market cap), financial statements (income/ratios), "
-        "money flow, northbound capital (HSGT top10), limit-up board analysis, and market sentiment.\n"
+        "money flow (historical via Tushare and real-time via East Money), "
+        "northbound capital (HSGT top10), limit-up board analysis, and market sentiment.\n"
         "US stock capabilities: historical K-line (get_us_stock_history), fundamental, technical, and sentiment analysis.\n"
         "Also supports X/Twitter post search."
     ),
@@ -142,6 +148,32 @@ async def get_moneyflow(
     return json.dumps(result, ensure_ascii=False)
 
 
+@mcp.tool()
+async def get_realtime_moneyflow(stock_names: str) -> str:
+    """
+    获取A股个股实时资金流向（盘中实时数据，来源东方财富）
+
+    数据源: 东方财富实时资金流API，免费无需配置。
+    适用场景: 交易时段(9:30-15:00)查看当日实时主力/散户资金流入流出。
+    非交易时段返回最近一个交易日的累计数据。
+
+    资金分级（东方财富标准）:
+      小单 ≤ 5万 | 中单 5~20万 | 大单 20~100万 | 超大单 ≥ 100万
+    注: 与 get_moneyflow(Tushare) 的分级标准不同，不宜直接对比。
+
+    Args:
+        stock_names: 股票名称，多个用逗号分隔，最多50只。
+                     例: '湖南黄金' 或 '贵州茅台,宁德时代,比亚迪'
+    Returns:
+        JSON: 每只股票的实时资金流向，包含:
+              - summary: 主力(大单+超大单) vs 散户(中单+小单) 流入/流出/净流入
+              - detail: 超大单/大单/中单/小单各自的买入、卖出、净流入
+              金额单位: 万元
+    """
+    result = await _eastmoney.get_realtime_moneyflow(stock_names)
+    return json.dumps(result, ensure_ascii=False)
+
+
 # ── A股历史行情 & 基本面 ─────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -164,20 +196,26 @@ async def get_stock_history(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     adj: str = "qfq",
+    limit: int = 120,
 ) -> str:
     """
     获取A股历史日K线行情（含复权价格及 MA/MACD/RSI 技术指标）
 
+    数据源: Tushare Pro + 复权因子，覆盖上市至今全部历史。
+    技术指标在返回前基于完整历史计算，因此即使 limit=20 也能拿到准确的 MA/MACD/RSI。
+
     Args:
         stock_names: 股票名称，多个用逗号分隔。例: '贵州茅台' 或 '贵州茅台,宁德时代'
-        start_date:  开始日期，格式 'YYYY-MM-DD' 或 'YYYYMMDD'（不填返回所有历史）
+        start_date:  开始日期，格式 'YYYY-MM-DD' 或 'YYYYMMDD'
         end_date:    结束日期，格式 'YYYY-MM-DD' 或 'YYYYMMDD'
         adj:         复权类型，'qfq'=前复权(默认), 'hfq'=后复权, 'none'=不复权
+        limit:       返回最近N条记录，默认120。设为0返回全部。
+                     技术指标基于完整历史计算后再截取，保证指标值准确。
     Returns:
         JSON: 每只股票的日线数据，含 open/high/low/close/vol/amount +
               MA5/10/20/60 + MACD(dif/dea/bar) + RSI14，按日期升序排列
     """
-    result = await _tushare.get_stock_history(stock_names, start_date, end_date, adj)
+    result = await _tushare.get_stock_history(stock_names, start_date, end_date, adj, limit)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -448,6 +486,33 @@ def search_x_posts(
         query, max_results, exclude_retweets, exclude_replies,
         require_links, language, min_engagement,
     )
+    return json.dumps(result, ensure_ascii=False)
+
+
+# ── 百度股市通 ──────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_baidu_stock_quote(stock_input: str, tab: str = "quote") -> str:
+    """
+    获取百度股市通(FinScope)股票数据（行情/资金/财务/公司/资讯）
+
+    数据源: 百度股市通（免费，无需 API Key）
+    适用场景: 通过百度股市通 URL 或股票代码获取多维度股票数据。
+
+    Args:
+        stock_input: 百度股市通 URL 或股票代码
+                     URL 示例: https://gushitong.baidu.com/stock/ab-000630
+                     代码示例: 000630, 600519
+        tab: 数据类型，默认 'quote'
+             'quote'   — 实时行情（价格/涨跌/盘口指标/五档买卖）
+             'capital' — 资金流向（日/周/月主力散户流入流出 + 超大/大/中/小单分布）
+             'finance' — 财务数据（关键指标ROE/ROA/EPS + 利润表/资产负债表/现金流 + 主营构成 + 估值）
+             'company' — 公司信息（行业/概念板块/公司资料/高管）
+             'news'    — 最新资讯（新闻/快讯/研报/公告）
+    Returns:
+        JSON: 对应 tab 的结构化数据
+    """
+    result = await _baidu_stock.get_stock_quote(stock_input, tab)
     return json.dumps(result, ensure_ascii=False)
 
 

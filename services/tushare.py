@@ -355,6 +355,7 @@ class TushareService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         adj: str = "qfq",
+        limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         """获取A股历史日K线（含前/后复权及 MA/MACD/RSI 技术指标）"""
         if not self.pro:
@@ -430,6 +431,10 @@ class TushareService:
                 loss  = (-delta.clip(upper=0)).rolling(14).mean()
                 rs    = gain / loss.where(loss != 0, other=float("nan"))
                 df["rsi14"] = (100 - 100 / (1 + rs)).round(2)
+
+                # Apply limit: return only the last N records (indicators already warmed up)
+                if limit and limit > 0:
+                    df = df.iloc[-limit:]
 
                 keep_cols = [col for col in df.columns if col != "adj_factor"]
                 records = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
