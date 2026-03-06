@@ -73,7 +73,7 @@ class TushareService:
         df = await loop.run_in_executor(
             None,
             lambda: self.pro.stock_basic(exchange="", list_status="L",
-                                          fields="ts_code,symbol,name"),
+                                          fields="ts_code,symbol,name,industry,area,market,list_date"),
         )
         if df is not None and not df.empty:
             self._save_cache("stock_basic", df.to_dict("records"))
@@ -720,3 +720,665 @@ class TushareService:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    # ── Tool: get_top_list (龙虎榜) ───────────────────────────────────────────
+
+    async def get_top_list(
+        self,
+        trade_date: Optional[str] = None,
+        stock_names: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """获取A股龙虎榜每日明细（上榜原因/买卖金额/净买入）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        kw: Dict[str, Any] = {}
+        if fmt(trade_date):
+            kw["trade_date"] = fmt(trade_date)
+
+        ts_code_filter = None
+        if stock_names:
+            names = [n.strip() for n in stock_names.split(",") if n.strip()]
+            name_code = await self._names_to_codes(names)
+            if name_code:
+                ts_code_filter = list(name_code.values())
+
+        if not kw and not ts_code_filter:
+            return {"success": False, "error": "请提供 trade_date 或 stock_names"}
+
+        try:
+            loop = asyncio.get_running_loop()
+
+            if ts_code_filter and len(ts_code_filter) == 1:
+                kw["ts_code"] = ts_code_filter[0]
+            df = await loop.run_in_executor(None, lambda: self.pro.top_list(**kw))
+            if df is None or df.empty:
+                return {"success": True, "data": [], "count": 0}
+
+            if ts_code_filter and "ts_code" not in kw:
+                df = df[df["ts_code"].isin(ts_code_filter)]
+
+            records = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                       for row in df.to_dict("records")]
+
+            # 尝试获取龙虎榜机构明细
+            inst_records = []
+            try:
+                df_inst = await loop.run_in_executor(None, lambda: self.pro.top_inst(**kw))
+                if df_inst is not None and not df_inst.empty:
+                    if ts_code_filter and "ts_code" not in kw:
+                        df_inst = df_inst[df_inst["ts_code"].isin(ts_code_filter)]
+                    inst_records = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                                    for row in df_inst.to_dict("records")]
+            except Exception:
+                pass
+
+            result: Dict[str, Any] = {
+                "success": True,
+                "data": records,
+                "count": len(records),
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            if inst_records:
+                result["institutions"] = inst_records
+                result["inst_count"] = len(inst_records)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Tool: get_margin_detail (融资融券) ────────────────────────────────────
+
+    async def get_margin_detail(
+        self,
+        stock_names: Optional[str] = None,
+        trade_date: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """获取A股融资融券交易明细（融资买入/融券卖出/余额）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        kw: Dict[str, Any] = {}
+        if fmt(trade_date):
+            kw["trade_date"] = fmt(trade_date)
+        if fmt(start_date):
+            kw["start_date"] = fmt(start_date)
+        if fmt(end_date):
+            kw["end_date"] = fmt(end_date)
+
+        ts_code_filter = None
+        if stock_names:
+            names = [n.strip() for n in stock_names.split(",") if n.strip()]
+            name_code = await self._names_to_codes(names)
+            if name_code:
+                if len(name_code) == 1:
+                    kw["ts_code"] = list(name_code.values())[0]
+                else:
+                    ts_code_filter = list(name_code.values())
+
+        if not kw:
+            return {"success": False, "error": "请提供 trade_date/stock_names/日期范围 至少一个"}
+
+        try:
+            loop = asyncio.get_running_loop()
+            df = await loop.run_in_executor(None, lambda: self.pro.margin_detail(**kw))
+            if df is None or df.empty:
+                return {"success": True, "data": [], "count": 0}
+
+            if ts_code_filter:
+                df = df[df["ts_code"].isin(ts_code_filter)]
+
+            df = df.sort_values("trade_date", ascending=False)
+            records = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                       for row in df.head(100).to_dict("records")]
+
+            return {
+                "success": True,
+                "data": records,
+                "count": len(records),
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Tool: get_stk_holdernumber (股东人数) ─────────────────────────────────
+
+    async def get_stk_holdernumber(
+        self,
+        stock_names: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """获取A股股东人数变化（筹码集中度参考）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        names = [n.strip() for n in stock_names.split(",") if n.strip()]
+        name_code = await self._names_to_codes(names)
+        if not name_code:
+            return {"success": False, "error": f"无法解析股票名称: {stock_names}"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        loop = asyncio.get_running_loop()
+        results: Dict[str, Any] = {}
+
+        for name, ts_code in name_code.items():
+            try:
+                kw: Dict[str, Any] = {"ts_code": ts_code}
+                if fmt(start_date):
+                    kw["start_date"] = fmt(start_date)
+                if fmt(end_date):
+                    kw["end_date"] = fmt(end_date)
+
+                df = await loop.run_in_executor(
+                    None, lambda k=kw: self.pro.stk_holdernumber(**k)
+                )
+                if df is None or df.empty:
+                    results[name] = {"ts_code": ts_code, "data": [], "count": 0}
+                    continue
+
+                df = df.sort_values("end_date", ascending=False).head(20)
+                records = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                           for row in df.to_dict("records")]
+                results[name] = {"ts_code": ts_code, "data": records, "count": len(records)}
+            except Exception as e:
+                results[name] = {"ts_code": ts_code, "error": str(e)}
+
+        return {"success": True, "results": results,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # ── Tool: get_balance_sheet (资产负债表) ──────────────────────────────────
+
+    async def get_balance_sheet(
+        self,
+        stock_names: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        """获取A股资产负债表（资产/负债/所有者权益）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        names = [n.strip() for n in stock_names.split(",") if n.strip()]
+        name_code = await self._names_to_codes(names)
+        if not name_code:
+            return {"success": False, "error": f"无法解析股票名称: {stock_names}"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        loop = asyncio.get_running_loop()
+        results_bs: Dict[str, Any] = {}
+        FIELDS = (
+            "ts_code,ann_date,f_ann_date,end_date,report_type,"
+            "total_assets,total_liab,total_hldr_eqty_exc_min_int,"
+            "cap_rese,surplus_rese,undistr_porfit,"
+            "money_cap,trad_asset,notes_receiv,accounts_receiv,"
+            "prepayment,inventories,fix_assets,cip,"
+            "lt_borr,st_borr,bond_payable,accounts_payab,"
+            "adv_receipts,goodwill,r_and_d"
+        )
+
+        for name, ts_code in name_code.items():
+            try:
+                kw: Dict[str, Any] = {"ts_code": ts_code, "report_type": "1", "fields": FIELDS}
+                if fmt(start_date):
+                    kw["start_date"] = fmt(start_date)
+                if fmt(end_date):
+                    kw["end_date"] = fmt(end_date)
+
+                df = await loop.run_in_executor(None, lambda k=kw: self.pro.balancesheet(**k))
+                if df is None or df.empty:
+                    results_bs[name] = {"ts_code": ts_code, "data": [], "count": 0}
+                    continue
+
+                df = df.sort_values("end_date", ascending=False).head(limit)
+                recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                        for row in df.to_dict("records")]
+                results_bs[name] = {"ts_code": ts_code, "data": recs, "count": len(recs)}
+            except Exception as e:
+                results_bs[name] = {"ts_code": ts_code, "error": str(e)}
+
+        return {"success": True, "results": results_bs,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # ── Tool: get_cashflow (现金流量表) ───────────────────────────────────────
+
+    async def get_cashflow(
+        self,
+        stock_names: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        """获取A股现金流量表（经营/投资/筹资活动现金流）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        names = [n.strip() for n in stock_names.split(",") if n.strip()]
+        name_code = await self._names_to_codes(names)
+        if not name_code:
+            return {"success": False, "error": f"无法解析股票名称: {stock_names}"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        loop = asyncio.get_running_loop()
+        results_cf: Dict[str, Any] = {}
+        FIELDS = (
+            "ts_code,ann_date,f_ann_date,end_date,report_type,"
+            "n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act,"
+            "c_fr_sale_sg,c_paid_goods_s,c_paid_to_for_empl,"
+            "c_paid_for_taxes,c_pay_acq_const_fiam,c_paid_invest,"
+            "c_recp_borrow,c_pay_dist_dpcp_int_exp,"
+            "free_cashflow,c_cash_equ_end_period"
+        )
+
+        for name, ts_code in name_code.items():
+            try:
+                kw: Dict[str, Any] = {"ts_code": ts_code, "report_type": "1", "fields": FIELDS}
+                if fmt(start_date):
+                    kw["start_date"] = fmt(start_date)
+                if fmt(end_date):
+                    kw["end_date"] = fmt(end_date)
+
+                df = await loop.run_in_executor(None, lambda k=kw: self.pro.cashflow(**k))
+                if df is None or df.empty:
+                    results_cf[name] = {"ts_code": ts_code, "data": [], "count": 0}
+                    continue
+
+                df = df.sort_values("end_date", ascending=False).head(limit)
+                recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                        for row in df.to_dict("records")]
+                results_cf[name] = {"ts_code": ts_code, "data": recs, "count": len(recs)}
+            except Exception as e:
+                results_cf[name] = {"ts_code": ts_code, "error": str(e)}
+
+        return {"success": True, "results": results_cf,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # ── Tool: get_share_float (限售股解禁) ────────────────────────────────────
+
+    async def get_share_float(
+        self,
+        stock_names: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """获取A股限售股解禁计划"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        kw: Dict[str, Any] = {}
+        if fmt(start_date):
+            kw["start_date"] = fmt(start_date)
+        if fmt(end_date):
+            kw["end_date"] = fmt(end_date)
+
+        ts_code_filter = None
+        if stock_names:
+            names = [n.strip() for n in stock_names.split(",") if n.strip()]
+            name_code = await self._names_to_codes(names)
+            if name_code:
+                if len(name_code) == 1:
+                    kw["ts_code"] = list(name_code.values())[0]
+                else:
+                    ts_code_filter = list(name_code.values())
+
+        if not kw:
+            return {"success": False, "error": "请提供 stock_names 或日期范围"}
+
+        try:
+            loop = asyncio.get_running_loop()
+            df = await loop.run_in_executor(None, lambda: self.pro.share_float(**kw))
+            if df is None or df.empty:
+                return {"success": True, "data": [], "count": 0}
+
+            if ts_code_filter:
+                df = df[df["ts_code"].isin(ts_code_filter)]
+
+            df = df.sort_values("float_date", ascending=True)
+            recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                    for row in df.head(100).to_dict("records")]
+
+            return {"success": True, "data": recs, "count": len(recs),
+                    "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Tool: get_research_report (券商研报) ─────────────────────────────────
+
+    async def get_research_report(
+        self,
+        stock_names: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """获取A股券商研报（评级/目标价/盈利预测）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        kw: Dict[str, Any] = {}
+        if fmt(start_date):
+            kw["start_date"] = fmt(start_date)
+        if fmt(end_date):
+            kw["end_date"] = fmt(end_date)
+
+        ts_code_filter = None
+        if stock_names:
+            names = [n.strip() for n in stock_names.split(",") if n.strip()]
+            name_code = await self._names_to_codes(names)
+            if name_code:
+                if len(name_code) == 1:
+                    kw["ts_code"] = list(name_code.values())[0]
+                else:
+                    ts_code_filter = list(name_code.values())
+
+        if not kw:
+            return {"success": False, "error": "请提供 stock_names 或日期范围"}
+
+        try:
+            loop = asyncio.get_running_loop()
+            df = await loop.run_in_executor(None, lambda: self.pro.report_rc(**kw))
+            if df is None or df.empty:
+                return {"success": True, "data": [], "count": 0}
+
+            if ts_code_filter:
+                df = df[df["ts_code"].isin(ts_code_filter)]
+
+            df = df.sort_values("report_date", ascending=False).head(limit)
+            recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                    for row in df.to_dict("records")]
+
+            return {"success": True, "data": recs, "count": len(recs),
+                    "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── Tool: get_peer_comparison (同行业对比) ────────────────────────────────
+
+    async def get_peer_comparison(
+        self,
+        stock_names: str,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        同行业公司估值横向对比。
+        查目标股行业，拉同行业所有股票估值指标做排名。
+        """
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        names = [n.strip() for n in stock_names.split(",") if n.strip()]
+        name_code = await self._names_to_codes(names)
+        if not name_code:
+            return {"success": False, "error": f"无法解析股票名称: {stock_names}"}
+
+        loop = asyncio.get_running_loop()
+        basic_df = await self._stock_basic_df()
+        if basic_df is None:
+            return {"success": False, "error": "无法获取股票基础列表"}
+
+        results_peer: Dict[str, Any] = {}
+
+        for name, ts_code in name_code.items():
+            try:
+                target = basic_df[basic_df["ts_code"] == ts_code]
+                if target.empty:
+                    results_peer[name] = {"error": f"未找到 {ts_code} 的基本信息"}
+                    continue
+                industry = target.iloc[0].get("industry")
+                if not industry:
+                    results_peer[name] = {"error": "未找到行业信息"}
+                    continue
+
+                peers = basic_df[basic_df["industry"] == industry]["ts_code"].tolist()
+
+                td = trade_date.replace("-", "") if trade_date else None
+                if not td:
+                    sample = await loop.run_in_executor(
+                        None, lambda: self.pro.daily_basic(ts_code=ts_code)
+                    )
+                    if sample is not None and not sample.empty:
+                        td = sample["trade_date"].max()
+                    else:
+                        results_peer[name] = {"error": "无法确定最近交易日"}
+                        continue
+
+                df = await loop.run_in_executor(
+                    None, lambda d=td: self.pro.daily_basic(trade_date=d)
+                )
+                if df is None or df.empty:
+                    results_peer[name] = {"error": "无法获取估值数据"}
+                    continue
+
+                df = df[df["ts_code"].isin(peers)].copy()
+                if df.empty:
+                    results_peer[name] = {"error": f"行业 '{industry}' 无估值数据"}
+                    continue
+
+                name_map = dict(zip(basic_df["ts_code"], basic_df["name"]))
+                df["name"] = df["ts_code"].map(name_map)
+
+                cols = ["ts_code", "name", "close", "pe", "pe_ttm", "pb",
+                        "ps", "ps_ttm", "turnover_rate", "total_mv", "circ_mv"]
+                cols = [c for c in cols if c in df.columns]
+                df = df[cols].copy()
+
+                recs = [{k: (None if pd.isna(v) else v) for k, v in rd.items()}
+                        for rd in df.to_dict("records")]
+
+                metric_cols = ["pe_ttm", "pb", "ps_ttm", "turnover_rate", "total_mv"]
+                stats = {}
+                for col in metric_cols:
+                    if col in df.columns:
+                        s = df[col].dropna()
+                        if not s.empty:
+                            stats[col] = {
+                                "mean": round(float(s.mean()), 2),
+                                "median": round(float(s.median()), 2),
+                                "min": round(float(s.min()), 2),
+                                "max": round(float(s.max()), 2),
+                            }
+
+                target_row = df[df["ts_code"] == ts_code]
+                target_pos = {}
+                if not target_row.empty:
+                    for col in metric_cols:
+                        if col in target_row.columns:
+                            val = target_row.iloc[0][col]
+                            if pd.notna(val):
+                                total = int(df[col].dropna().count())
+                                rank = int((df[col].dropna() <= val).sum())
+                                target_pos[col] = {
+                                    "value": round(float(val), 2),
+                                    "rank": rank, "total": total,
+                                    "percentile": round(rank / total * 100, 1) if total else None,
+                                }
+
+                results_peer[name] = {
+                    "ts_code": ts_code, "industry": industry,
+                    "peer_count": len(recs),
+                    "target_position": target_pos,
+                    "industry_stats": stats,
+                    "peers": sorted(recs, key=lambda x: x.get("total_mv") or 0, reverse=True)[:20],
+                }
+            except Exception as e:
+                results_peer[name] = {"ts_code": ts_code, "error": str(e)}
+
+        return {"success": True, "results": results_peer,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # ── Tool: get_stock_mins (分钟K线) ────────────────────────────────────────
+
+    async def get_stock_mins(
+        self,
+        stock_names: str,
+        freq: str = "5min",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 240,
+    ) -> Dict[str, Any]:
+        """获取A股分钟级K线数据（1/5/15/30/60分钟）"""
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        valid_freqs = {"1min", "5min", "15min", "30min", "60min"}
+        if freq not in valid_freqs:
+            return {"success": False, "error": f"freq 必须是 {valid_freqs} 之一"}
+
+        names = [n.strip() for n in stock_names.split(",") if n.strip()]
+        name_code = await self._names_to_codes(names)
+        if not name_code:
+            return {"success": False, "error": f"无法解析股票名称: {stock_names}"}
+
+        def fmt(d: Optional[str]) -> Optional[str]:
+            return d.replace("-", "") if d else None
+
+        loop = asyncio.get_running_loop()
+        results_mins: Dict[str, Any] = {}
+
+        for name, ts_code in name_code.items():
+            try:
+                kw: Dict[str, Any] = {"ts_code": ts_code, "freq": freq}
+                if fmt(start_date):
+                    kw["start_date"] = fmt(start_date)
+                if fmt(end_date):
+                    kw["end_date"] = fmt(end_date)
+
+                df = await loop.run_in_executor(None, lambda k=kw: self.pro.stk_mins(**k))
+                if df is None or df.empty:
+                    results_mins[name] = {"ts_code": ts_code, "data": [], "count": 0}
+                    continue
+
+                df = df.sort_values("trade_time", ascending=False).head(limit)
+                df = df.sort_values("trade_time", ascending=True)
+                recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                        for row in df.to_dict("records")]
+                results_mins[name] = {"ts_code": ts_code, "data": recs, "count": len(recs)}
+            except Exception as e:
+                results_mins[name] = {"ts_code": ts_code, "error": str(e)}
+
+        return {"success": True, "results": results_mins,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+    # ── Tool: get_macro_data (宏观经济数据) ───────────────────────────────────
+
+    async def get_macro_data(
+        self,
+        indicator: str = "all",
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 12,
+    ) -> Dict[str, Any]:
+        """
+        获取中国宏观经济数据（CPI/PPI/货币供应/GDP/SHIBOR）
+        indicator: 'cpi','ppi','money','gdp','shibor','all'
+        """
+        if not self.pro:
+            return {"success": False, "error": "Tushare Pro not available"}
+
+        loop = asyncio.get_running_loop()
+        results_macro: Dict[str, Any] = {}
+
+        indicators = [indicator] if indicator != "all" else ["cpi", "ppi", "money", "gdp", "shibor"]
+
+        for ind in indicators:
+            try:
+                if ind == "cpi":
+                    kw: Dict[str, Any] = {}
+                    if start_date:
+                        kw["start_month"] = start_date.replace("-", "")[:6]
+                    if end_date:
+                        kw["end_month"] = end_date.replace("-", "")[:6]
+                    df = await loop.run_in_executor(None, lambda k=kw: self.pro.cn_cpi(**k))
+                    if df is not None and not df.empty:
+                        df = df.sort_values("month", ascending=False).head(limit)
+                        # 只保留关键列
+                        key_cols = ["month", "nt_val", "nt_yoy", "nt_mom", "nt_accu"]
+                        key_cols = [c for c in key_cols if c in df.columns]
+                        df = df[key_cols]
+
+                elif ind == "ppi":
+                    kw = {}
+                    if start_date:
+                        kw["start_month"] = start_date.replace("-", "")[:6]
+                    if end_date:
+                        kw["end_month"] = end_date.replace("-", "")[:6]
+                    df = await loop.run_in_executor(None, lambda k=kw: self.pro.cn_ppi(**k))
+                    if df is not None and not df.empty:
+                        df = df.sort_values("month", ascending=False).head(limit)
+                        key_cols = ["month", "ppi_yoy", "ppi_mp_yoy", "ppi_cg_yoy"]
+                        key_cols = [c for c in key_cols if c in df.columns]
+                        df = df[key_cols]
+
+                elif ind == "money":
+                    kw = {}
+                    if start_date:
+                        kw["start_month"] = start_date.replace("-", "")[:6]
+                    if end_date:
+                        kw["end_month"] = end_date.replace("-", "")[:6]
+                    df = await loop.run_in_executor(None, lambda k=kw: self.pro.cn_m(**k))
+                    if df is not None and not df.empty:
+                        df = df.sort_values("month", ascending=False).head(limit)
+                        key_cols = ["month", "m0", "m0_yoy", "m1", "m1_yoy", "m2", "m2_yoy"]
+                        key_cols = [c for c in key_cols if c in df.columns]
+                        df = df[key_cols]
+
+                elif ind == "gdp":
+                    kw = {}
+                    if start_date:
+                        y = start_date[:4]
+                        kw["start_q"] = f"{y}Q1"
+                    if end_date:
+                        y = end_date[:4]
+                        kw["end_q"] = f"{y}Q4"
+                    df = await loop.run_in_executor(None, lambda k=kw: self.pro.cn_gdp(**k))
+                    if df is not None and not df.empty:
+                        df = df.sort_values("quarter", ascending=False).head(limit)
+                        key_cols = ["quarter", "gdp", "gdp_yoy", "pi", "si", "ti", "ti_yoy"]
+                        key_cols = [c for c in key_cols if c in df.columns]
+                        df = df[key_cols]
+
+                elif ind == "shibor":
+                    kw = {}
+                    if start_date:
+                        kw["start_date"] = start_date.replace("-", "")
+                    if end_date:
+                        kw["end_date"] = end_date.replace("-", "")
+                    df = await loop.run_in_executor(None, lambda k=kw: self.pro.shibor(**k))
+                    if df is not None and not df.empty:
+                        df = df.sort_values("date", ascending=False).head(limit)
+
+                else:
+                    results_macro[ind] = {"error": f"未知指标: {ind}"}
+                    continue
+
+                if df is not None and not df.empty:
+                    recs = [{k: (None if pd.isna(v) else v) for k, v in row.items()}
+                            for row in df.to_dict("records")]
+                    results_macro[ind] = {"data": recs, "count": len(recs)}
+                else:
+                    results_macro[ind] = {"data": [], "count": 0}
+            except Exception as e:
+                results_macro[ind] = {"error": str(e)}
+
+        return {"success": True, "results": results_macro,
+                "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}

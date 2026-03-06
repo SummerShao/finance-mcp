@@ -2,61 +2,42 @@
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that gives AI assistants (Claude, etc.) real financial data capabilities — covering A-shares, US stocks, and market intelligence tools.
 
+**A股数据全部免费，无需 API Key。**
+
 ## Features
 
-### A股实时行情
-| Tool | Description |
-|------|-------------|
-| `get_realtime_by_name` | 实时报价：价格、涨跌幅、成交量、买一卖一盘口（最多50只）|
-| `get_realtime_tick_by_name` | 当日全部逐笔成交明细（时间、价格、方向、成交量）|
-| `get_realtime_list_top` | 全市场实时排行榜（涨幅榜/跌幅榜/成交额/换手率等）|
+### A股行情与K线
+| Tool | Description | 数据源 |
+|------|-------------|--------|
+| `get_stock_history` | 历史日K线（前/后复权）+ MA5/10/20/60 + MACD + RSI14 | 东方财富 |
+| `get_realtime_list_top` | 全市场实时排行榜（涨幅/跌幅/成交额/换手率/主力净流入等） | 东方财富 |
+| `get_baidu_stock_quote` | 多维度股票数据（行情/资金/财务/公司/资讯，5个tab） | 百度股市通 |
 
-### A股历史行情与估值
-| Tool | Description |
-|------|-------------|
-| `get_stock_history` | 历史日K线（前/后复权）+ MA5/10/20/60 + MACD + RSI14 |
-| `get_daily_basic` | 每日估值指标：PE/PB/PS/股息率/换手率/量比/总市值/流通市值 |
-| `get_moneyflow` | 个股资金流向：大单/中单/小单买卖净流入（覆盖2010年至今）|
-
-### A股基本面
-| Tool | Description |
-|------|-------------|
-| `get_stock_info` | 股票基本信息：行业/地区/上市日期/市场/沪深港通标识 |
-| `get_financial_indicators` | 财务指标：ROE/ROA/净利率/毛利率/流动比率/资产负债率/净利润增速/FCF |
-| `get_income_statement` | 利润表：营收/净利润/归母净利/三费/EPS/EBIT/EBITDA/研发费用 |
-
-### A股资金与情绪
-| Tool | Description |
-|------|-------------|
-| `get_hsgt_top10` | 沪深港通十大成交股（北向/南向资金流入 Top10）|
-| `get_daban_indicators` | 涨停板核心因子：封板时间/质量、封单力度、筹码分布、游资动向等20+维度 |
-| `get_market_sentiment_report` | 市场涨停板情绪复盘：连板梯队、热门板块 Top20、情绪评级 |
+### A股资金与市场
+| Tool | Description | 数据源 |
+|------|-------------|--------|
+| `get_realtime_moneyflow` | 个股实时资金流向：超大/大/中/小单买卖净流入 | 东方财富 |
+| `get_market_overview` | 大盘实时概览：主要指数行情 + 全市场涨跌统计 | 东方财富 |
+| `get_sector_ranking` | 板块涨跌幅排行（行业板块/概念板块）+ 领涨股 | 新浪财经 |
 
 ### 美股分析
 | Tool | Description |
 |------|-------------|
+| `get_us_stock_history` | 美股历史K线（OHLCV） |
 | `get_fundamental_analysis` | 基本面：公司概况、财务指标、股权结构、高管、SEC 文件 |
 | `get_technical_analysis` | 技术面：SMA/EMA/RSI/MACD/支撑阻力位/综合信号 |
 | `get_sentiment_analysis` | 情绪面：新闻情绪、社交情绪、内部人交易、分析师评级变化 |
 | `get_comprehensive_analysis` | 全维度综合分析（基本面 + 技术面 + 情绪面一次返回）|
 
-### 搜索
-| Tool | Description |
-|------|-------------|
-| `search_x_posts` | X (Twitter) 热帖搜索（按热度+时间衰减排序）|
-
 ---
 
 ## Prerequisites
 
-申请以下 API Key（按需，只需要用到的功能对应的 Key）：
-
-| 服务 | 用途 | 申请地址 | 费用 |
-|------|------|----------|------|
-| **Tushare Pro** | A股全部功能 | [tushare.pro](https://tushare.pro/register?reg=700000) | 免费注册，部分接口需积分 |
-| **Finnhub** | 美股基本面/情绪 | [finnhub.io](https://finnhub.io) | 免费套餐可用 |
-| **Polygon.io** | 美股技术指标 | [polygon.io](https://polygon.io) | 免费套餐可用 |
-| **X API** | Twitter 搜索 | [developer.x.com](https://developer.x.com) | 免费套餐可用 |
+| 服务 | 用途 | 费用 |
+|------|------|------|
+| **东方财富 / 百度股市通 / 新浪财经** | A股全部功能 | **免费，无需申请** |
+| **Finnhub** | 美股基本面/情绪（可选） | 免费套餐可用，[finnhub.io](https://finnhub.io) |
+| **Polygon.io** | 美股技术指标（可选） | 免费套餐可用，[polygon.io](https://polygon.io) |
 
 ---
 
@@ -72,9 +53,9 @@ cd finance-mcp-server
 # 2. 安装依赖（建议 Python 3.11+）
 pip install -r requirements.txt
 
-# 3. 配置 API Key
+# 3. 配置 API Key（仅美股功能需要，A股无需配置）
 cp .env.example .env
-# 编辑 .env，填入你的 API Key
+# 编辑 .env，填入美股 API Key（可选）
 
 # 4. 启动（stdio 模式）
 python server.py
@@ -87,9 +68,8 @@ python server.py
 git clone https://github.com/your-username/finance-mcp-server.git
 cd finance-mcp-server
 
-# 2. 配置 API Key
+# 2. 配置 API Key（仅美股功能需要）
 cp .env.example .env
-# 编辑 .env，填入你的 API Key
 
 # 3. 构建并启动
 docker compose up -d
@@ -106,22 +86,18 @@ curl http://localhost:8000/sse
 编辑 `.env` 文件：
 
 ```env
-# A股行情 & 涨停板分析（必填，用于所有 A股工具）
-TUSHARE_TOKEN=your_tushare_token_here
-
 # 美股基本面 & 情绪分析（可选）
 FINNHUB_API_KEY=your_finnhub_api_key_here
 
 # 美股技术指标（可选）
 POLYGON_API_KEY=your_polygon_api_key_here
 
-# X (Twitter) 搜索（可选）
-X_API_KEY=your_x_bearer_token_here
-
 # 传输方式：stdio（本地）| sse（Docker/远程）
 MCP_TRANSPORT=stdio
 MCP_PORT=8000
 ```
+
+> A股数据全部来自免费公开 API（东方财富、百度股市通、新浪财经），无需任何 API Key。
 
 ---
 
@@ -139,10 +115,7 @@ MCP_PORT=8000
   "mcpServers": {
     "finance-mcp": {
       "command": "python",
-      "args": ["/absolute/path/to/finance-mcp-server/server.py"],
-      "env": {
-        "TUSHARE_TOKEN": "your_token_here"
-      }
+      "args": ["/absolute/path/to/finance-mcp-server/server.py"]
     }
   }
 }
@@ -174,13 +147,15 @@ Docker 启动后，在项目的 `.claude/mcp.json` 中配置（或 `~/.claude/mc
 配置完成后，直接用自然语言提问即可，AI 会自动调用合适的工具组合：
 
 ```
-帮我分析贵州茅台，包括基本面、估值和近期走势
+帮我看看贵州茅台最近的K线走势和技术指标
 
-对比宁德时代和比亚迪最近两年的财务指标
+今天涨幅前20的股票有哪些？
 
-今天北向资金重点买入了哪些股票？
+贵州茅台的实时资金流向怎么样？
 
-分析一下浦发银行的涨停板情况
+帮我查一下 600519 的财务数据和公司信息
+
+今天哪些板块涨得好？概念板块排行呢？
 
 NVDA 最近的综合分析怎么样？
 ```
@@ -193,33 +168,16 @@ NVDA 最近的综合分析怎么样？
 finance-mcp-server/
 ├── server.py              # MCP 服务入口，所有 tool 注册
 ├── services/
-│   ├── tushare.py         # A股行情、历史K线、财务数据（Tushare Pro）
-│   ├── daban.py           # 涨停板分析（同花顺 via Tushare Pro）
-│   ├── us_stock.py        # 美股分析（Finnhub + Polygon.io）
-│   └── x_search.py        # X/Twitter 搜索
+│   ├── stock_resolver.py  # 股票名称↔代码解析（东方财富）
+│   ├── eastmoney.py       # K线/排行/资金流/大盘（东方财富）
+│   ├── baidu_stock.py     # 多维度股票数据（百度股市通）
+│   ├── sina_sector.py     # 板块排行（新浪财经）
+│   └── us_stock.py        # 美股分析（Finnhub + Polygon.io）
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env.example
 ```
-
----
-
-## Tushare 积分说明
-
-部分接口需要一定积分，常用接口的最低要求：
-
-| 接口 | 最低积分 |
-|------|----------|
-| `stock_basic` / `daily` / `adj_factor` | 免费 |
-| `daily_basic`（PE/PB/市值）| 120 |
-| `moneyflow`（资金流向）| 120 |
-| `fina_indicator`（财务指标）| 2000 |
-| `income`（利润表）| 2000 |
-| `hsgt_top10`（北向资金）| 600 |
-| 涨停板相关（ths_* 系列）| 2000+ |
-
-免费注册后默认有 100 积分，可通过实名认证、邀请等方式提升。
 
 ---
 
